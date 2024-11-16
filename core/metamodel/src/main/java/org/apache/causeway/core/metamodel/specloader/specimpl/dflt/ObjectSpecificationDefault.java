@@ -18,7 +18,6 @@
  */
 package org.apache.causeway.core.metamodel.specloader.specimpl.dflt;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
@@ -35,7 +34,6 @@ import org.apache.causeway.commons.internal.base._Casts;
 import org.apache.causeway.commons.internal.base._Lazy;
 import org.apache.causeway.commons.internal.base._NullSafe;
 import org.apache.causeway.commons.internal.base._Strings;
-import org.apache.causeway.commons.internal.collections._Lists;
 import org.apache.causeway.commons.internal.collections._Maps;
 import org.apache.causeway.commons.internal.reflection._ClassCache;
 import org.apache.causeway.commons.internal.reflection._GenericResolver.ResolvedMethod;
@@ -69,7 +67,6 @@ import org.apache.causeway.core.metamodel.specloader.specimpl.ObjectSpecificatio
 import org.apache.causeway.core.metamodel.specloader.specimpl.OneToManyAssociationDefault;
 import org.apache.causeway.core.metamodel.specloader.specimpl.OneToOneAssociationDefault;
 
-import lombok.Getter;
 import lombok.extern.log4j.Log4j2;
 
 @Log4j2
@@ -82,11 +79,13 @@ implements FacetHolder {
      */
     private Map<ResolvedMethod, ObjectMember> membersByMethod = null;
 
-    private final FacetedMethodsBuilder facetedMethodsBuilder;
-    private final ClassSubstitutorRegistry classSubstitutorRegistry;
+    private final _Lazy<FacetedMethodsBuilder> facetedMethodsBuilderLazy;
 
-    @Getter(onMethod_ = {@Override})
-    private final IntrospectionPolicy introspectionPolicy;
+    private final _Lazy<IntrospectionPolicy> introspectionPolicyLazy;
+    @Override
+    public IntrospectionPolicy getIntrospectionPolicy() {
+        return introspectionPolicyLazy.get();
+    }
 
     public ObjectSpecificationDefault(
             final CausewayBeanMetaData typeMeta,
@@ -104,33 +103,28 @@ implements FacetHolder {
             case NONE, CAUSEWAY, PERSISTENCE -> true;
             case UNSPECIFIED, SPRING  -> false;
         }; 
-        this.classSubstitutorRegistry = classSubstitutorRegistry;
 
         // must install EncapsulationFacet (if any) and MemberAnnotationPolicyFacet (if any)
         facetProcessor.processObjectType(typeMeta.getCorrespondingClass(), this);
 
         // naturally supports attribute inheritance from the type's hierarchy
-        final IntrospectionPolicy introspectionPolicy =
-                this.lookupFacet(IntrospectionPolicyFacet.class)
+        this.introspectionPolicyLazy = _Lazy.threadSafe(()->
+            this.lookupFacet(IntrospectionPolicyFacet.class)
                 .map(introspectionPolicyFacet->
                         introspectionPolicyFacet
                         .getIntrospectionPolicy(mmc.getConfiguration()))
-                .orElseGet(()->mmc.getConfiguration().getCore().getMetaModel().getIntrospector().getPolicy());
+                .orElseGet(()->mmc.getConfiguration().getCore().getMetaModel().getIntrospector().getPolicy())
+        );
 
-        this.introspectionPolicy = introspectionPolicy;
-
-        this.facetedMethodsBuilder =
-                new FacetedMethodsBuilder(this, facetProcessor, classSubstitutorRegistry);
+        this.facetedMethodsBuilderLazy = _Lazy.threadSafe(()->
+                new FacetedMethodsBuilder(this, facetProcessor, classSubstitutorRegistry));
     }
 
     @Override
     protected void introspectTypeHierarchy() {
-
-        facetedMethodsBuilder.introspectClass();
-
+        facetedMethodsBuilderLazy.get().introspectClass();
         // name
         addNamedFacetIfRequired();
-
         // go no further if a value
         if(this.isValue()) {
             if (log.isDebugEnabled()) {
@@ -138,39 +132,12 @@ implements FacetHolder {
             }
             return;
         }
-
-        // superclass
-        final Class<?> superclass = getCorrespondingClass().getSuperclass();
-        loadSpecOfSuperclass(superclass);
-
-        // walk superinterfaces
-
-        //
-        // REVIEW: the processing here isn't quite the same as with
-        // superclasses, in that with superclasses the superclass adds this type as its
-        // subclass, whereas here this type defines itself as the subtype.
-        //
-        // it'd be nice to push the responsibility for adding subclasses to
-        // the interface type... needs some tests around it, though, before
-        // making that refactoring.
-        //
-        final Class<?>[] interfaceTypes = getCorrespondingClass().getInterfaces();
-        final List<ObjectSpecification> interfaceSpecList = _Lists.newArrayList();
-        for (var interfaceType : interfaceTypes) {
-            var interfaceSubstitute = classSubstitutorRegistry.getSubstitution(interfaceType);
-            if (interfaceSubstitute.isReplace()) {
-                var interfaceSpec = getSpecificationLoader().loadSpecification(interfaceSubstitute.getReplacement());
-                interfaceSpecList.add(interfaceSpec);
-            }
-        }
-
-        updateAsSubclassTo(interfaceSpecList);
-        updateInterfaces(interfaceSpecList);
+        hierarchy.superclassLazy().get();
+        hierarchy.interfacesLazy().get();
     }
 
     @Override
     protected void introspectMembers() {
-
         // yet this logic does not skip UNKNONW
         if(this.getBeanSort().isCollection()
                 || this.getBeanSort().isVetoed()
@@ -183,7 +150,8 @@ implements FacetHolder {
 
         // create associations and actions
         replaceAssociations(createAssociations());
-        replaceActions(createActions());
+        
+        members.actions().addRegularActions(createActions());
 
         postProcess();
     }
@@ -198,7 +166,7 @@ implements FacetHolder {
 
     // -- create associations and actions
     private Stream<ObjectAssociation> createAssociations() {
-        return facetedMethodsBuilder.getAssociationFacetedMethods()
+        return facetedMethodsBuilderLazy.get().getAssociationFacetedMethods()
                 .stream()
                 .map(this::createAssociation)
                 .filter(_NullSafe::isPresent);
@@ -215,7 +183,7 @@ implements FacetHolder {
     }
 
     private Stream<ObjectAction> createActions() {
-        return facetedMethodsBuilder.getActionFacetedMethods()
+        return facetedMethodsBuilderLazy.get().getActionFacetedMethods()
                 .stream()
                 .map(this::createAction)
                 .filter(_NullSafe::isPresent);
@@ -246,17 +214,7 @@ implements FacetHolder {
             final @Nullable String id,
             final ImmutableEnumSet<ActionScope> actionScopes,
             final MixedIn mixedIn) {
-
-        introspectUpTo(IntrospectionState.FULLY_INTROSPECTED);
-
-        return _Strings.isEmpty(id)
-            ? Optional.empty()
-            : streamDeclaredActions(actionScopes, mixedIn)
-                .filter(action->
-                    id.equals(action.getFeatureIdentifier().getMemberNameAndParameterClassNamesIdentityString())
-                            || id.equals(action.getFeatureIdentifier().getMemberLogicalName())
-                )
-                .findFirst();
+        return members.actions().getDeclaredAction(id, actionScopes, mixedIn);
     }
 
     @Override

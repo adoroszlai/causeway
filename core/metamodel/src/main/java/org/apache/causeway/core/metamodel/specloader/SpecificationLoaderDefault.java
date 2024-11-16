@@ -576,16 +576,14 @@ implements
             final @NonNull Function<Class<?>, CausewayBeanMetaData> beanClassifier,
             final @NonNull IntrospectionState upTo) {
 
-        if(type==null) {
-            return null;
-        }
+        if(type==null) return null;
 
         var substitute = classSubstitutorRegistry.getSubstitution(type);
         if (substitute.isNeverIntrospect()) return null; // never inspect
 
         var substitutedType = substitute.apply(type);
 
-        var spec = cache.computeIfAbsent(substitutedType, _spec->
+        var spec = cache.computeIfAbsent(substitutedType, cls->
             logicalTypeResolver
                 .register(
                         createSpecification(beanClassifier.apply(substitutedType))));

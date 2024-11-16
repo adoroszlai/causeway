@@ -18,16 +18,12 @@
  */
 package org.apache.causeway.core.metamodel.specloader.specimpl;
 
-import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.Stack;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import org.springframework.util.ClassUtils;
 
 import org.apache.causeway.applib.Identifier;
 import org.apache.causeway.applib.annotation.Domain;
@@ -42,9 +38,6 @@ import org.apache.causeway.commons.internal.base._Lazy;
 import org.apache.causeway.commons.internal.base._NullSafe;
 import org.apache.causeway.commons.internal.base._Oneshot;
 import org.apache.causeway.commons.internal.base._Strings;
-import org.apache.causeway.commons.internal.collections._Lists;
-import org.apache.causeway.commons.internal.collections._Multimaps;
-import org.apache.causeway.commons.internal.collections._Multimaps.ListMultimap;
 import org.apache.causeway.commons.internal.collections._Sets;
 import org.apache.causeway.commons.internal.collections._Streams;
 import org.apache.causeway.commons.internal.exceptions._Exceptions;
@@ -82,6 +75,7 @@ import org.apache.causeway.core.metamodel.interactions.ObjectValidityContext;
 import org.apache.causeway.core.metamodel.object.ManagedObject;
 import org.apache.causeway.core.metamodel.object.ManagedObjects;
 import org.apache.causeway.core.metamodel.spec.ActionScope;
+import org.apache.causeway.core.metamodel.spec.HierarchicalRecord;
 import org.apache.causeway.core.metamodel.spec.IntrospectionState;
 import org.apache.causeway.core.metamodel.spec.ObjectSpecification;
 import org.apache.causeway.core.metamodel.spec.feature.MixedIn;
@@ -106,78 +100,29 @@ public abstract class ObjectSpecificationAbstract
 extends ObjectMemberContainer
 implements ObjectSpecification {
 
-    /**
-     * @implNote thread-safe
-     */
-    private static class Subclasses {
-
-        // List performs better compared to a Set, when the number of elements is low
-        private Can<ObjectSpecification> classes = Can.empty();
-        private final Object $lock = new Object();
-
-        public void addSubclass(final ObjectSpecification subclass) {
-            synchronized($lock) {
-                classes = classes.addUnique(subclass);
-            }
-        }
-
-        public boolean hasSubclasses() {
-            synchronized($lock) {
-                return classes.isNotEmpty();
-            }
-        }
-
-        public Can<ObjectSpecification> snapshot() {
-            synchronized($lock) {
-                return classes;
-            }
-        }
-    }
-
     // -- FIELDS
 
     private final PostProcessor postProcessor;
     private final FacetProcessor facetProcessor;
-    private final ObjectSpecificationBody body = new ObjectSpecificationBody();
+    
+    public final HierarchicalRecord hierarchy;
+    protected final ObjectMemberContainerRecord members;
 
     @Getter private final BeanSort beanSort;
 
-    // -- ASSOCIATIONS
-
-    // defensive immutable lazy copy of associations
-    private final _Lazy<Can<ObjectAssociation>> unmodifiableAssociations = _Lazy.threadSafe(body::snapshotAssociations);
-
-    // -- ACTIONS
-    
     /** not API, used for validation */
     @Getter private final Set<ResolvedMethod> potentialOrphans = _Sets.newHashSet();
+    
+    // -- MEMBERS
 
-    // defensive immutable lazy copy of objectActions
-    private final _Lazy<Can<ObjectAction>> unmodifiableActions = _Lazy.threadSafe(body::snapshotActions);
-
-    // partitions and caches objectActions by type; updated in sortCacheAndUpdateActions()
-    private final ListMultimap<ActionScope, ObjectAction> objectActionsByType =
-            _Multimaps.newConcurrentListMultimap();
-
-    // -- INTERFACES
-
-    private final List<ObjectSpecification> interfaces = _Lists.newArrayList();
-
-    // defensive immutable lazy copy of interfaces
-    private final _Lazy<Can<ObjectSpecification>> unmodifiableInterfaces =
-            _Lazy.threadSafe(()->Can.ofCollection(interfaces));
-
-    private final Subclasses directSubclasses = new Subclasses();
-    // built lazily
-    private Subclasses transitiveSubclasses;
+    // defensive immutable lazy copy of associations
+    private final _Lazy<Can<ObjectAssociation>> unmodifiableAssociations;
 
     private final Class<?> correspondingClass;
     private final String fullName;
     private final String shortName;
 
     private final LogicalType logicalType;
-
-    private ObjectSpecification superclassSpec;
 
     private ValueFacet valueFacet;
     private EntityFacet entityFacet;
@@ -210,6 +155,10 @@ implements ObjectSpecification {
 
         this.facetProcessor = facetProcessor;
         this.postProcessor = postProcessor;
+        
+        this.hierarchy = new HierarchicalRecord(this);
+        this.members = new ObjectMemberContainerRecord(this, hierarchy::superclass, facetProcessor);
+        this.unmodifiableAssociations = _Lazy.threadSafe(members::snapshotAssociations);
     }
 
     // -- Stuff immediately derivable from class
@@ -336,69 +285,11 @@ implements ObjectSpecification {
     protected abstract void introspectTypeHierarchy();
     protected abstract void introspectMembers();
 
-    protected void loadSpecOfSuperclass(final Class<?> superclass) {
-        if (superclass == null) {
-            return;
-        }
-        superclassSpec = getSpecificationLoader().loadSpecification(superclass);
-        if (superclassSpec != null) {
-            if (log.isDebugEnabled()) {
-                log.debug("  Superclass {}", superclass.getName());
-            }
-            updateAsSubclassTo(superclassSpec);
-        }
-    }
-
-    protected void updateInterfaces(final List<ObjectSpecification> interfaces) {
-        synchronized(unmodifiableInterfaces) {
-            this.interfaces.clear();
-            this.interfaces.addAll(interfaces);
-            unmodifiableInterfaces.clear();
-        }
-    }
-
-    private void updateAsSubclassTo(final ObjectSpecification supertypeSpec) {
-        if (!(supertypeSpec instanceof ObjectSpecificationAbstract)) {
-            return;
-        }
-        // downcast required because addSubclass is (deliberately) not public
-        // API
-        var introspectableSpec = (ObjectSpecificationAbstract) supertypeSpec;
-        introspectableSpec.updateSubclasses(this);
-    }
-
-    protected void updateAsSubclassTo(final List<ObjectSpecification> supertypeSpecs) {
-        for (final ObjectSpecification supertypeSpec : supertypeSpecs) {
-            updateAsSubclassTo(supertypeSpec);
-        }
-    }
-
-    private void updateSubclasses(final ObjectSpecification subclass) {
-        this.directSubclasses.addSubclass(subclass);
-    }
-
     protected final void replaceAssociations(final Stream<ObjectAssociation> associations) {
         var orderedAssociations = _MemberSortingUtils.sortAssociationsIntoList(associations);
         synchronized (unmodifiableAssociations) {
-            body.replaceAssociations(orderedAssociations);
+            members.replaceAssociations(orderedAssociations);
             unmodifiableAssociations.clear(); // invalidate
-        }
-    }
-
-    protected final void replaceActions(final Stream<ObjectAction> objectActions) {
-        var orderedActions = _MemberSortingUtils.sortActionsIntoList(objectActions);
-        synchronized (unmodifiableActions){
-            body.replaceActions(orderedActions);
-            unmodifiableActions.clear(); // invalidate
-
-            // rebuild objectActionsByType multi-map
-            for (var actionType : ActionScope.values()) {
-                var objectActionForType = objectActionsByType.getOrElseNew(actionType);
-                objectActionForType.clear();
-                orderedActions.stream()
-                .filter(ObjectAction.Predicates.ofActionType(actionType))
-                .forEach(objectActionForType::add);
-            }
         }
     }
 
@@ -525,23 +416,13 @@ implements ObjectSpecification {
     // -- HIERARCHICAL
 
     @Override
-    public boolean isOfType(final ObjectSpecification other) {
-
-        var thisClass = this.getCorrespondingClass();
-        var otherClass = other.getCorrespondingClass();
-
-        return thisClass == otherClass
-                || otherClass.isAssignableFrom(thisClass);
+    public final boolean isOfType(final ObjectSpecification other) {
+        return hierarchy.isOfType(other);
     }
 
     @Override
-    public boolean isOfTypeResolvePrimitive(final ObjectSpecification other) {
-
-        var thisClass = ClassUtils.resolvePrimitiveIfNecessary(this.getCorrespondingClass());
-        var otherClass = ClassUtils.resolvePrimitiveIfNecessary(other.getCorrespondingClass());
-
-        return thisClass == otherClass
-                || otherClass.isAssignableFrom(thisClass);
+    public final boolean isOfTypeResolvePrimitive(final ObjectSpecification other) {
+        return hierarchy.isOfTypeResolvePrimitive(other);
     }
 
     // -- NAME, DESCRIPTION, PERSISTABILITY
@@ -587,31 +468,26 @@ implements ObjectSpecification {
 
     @Override
     public <Q extends Facet> Q getFacet(final Class<Q> facetType) {
+        // lookup facet holder's facet
+        var facets1 = _NullSafe.streamNullable(super.getFacet(facetType));
 
-        synchronized(unmodifiableInterfaces) {
+        // lookup all interfaces
+        var facets2 = _NullSafe.stream(interfaces())
+                .filter(_NullSafe::isPresent) // just in case
+                .map(interfaceSpec->interfaceSpec.getFacet(facetType));
 
-            // lookup facet holder's facet
-            var facets1 = _NullSafe.streamNullable(super.getFacet(facetType));
+        // search up the inheritance hierarchy
+        var facets3 = _NullSafe.streamNullable(superclass())
+                .map(superSpec->superSpec.getFacet(facetType));
 
-            // lookup all interfaces
-            var facets2 = _NullSafe.stream(interfaces())
-                    .filter(_NullSafe::isPresent) // just in case
-                    .map(interfaceSpec->interfaceSpec.getFacet(facetType));
+        var facetsCombined = _Streams.concat(facets1, facets2, facets3);
 
-            // search up the inheritance hierarchy
-            var facets3 = _NullSafe.streamNullable(superclass())
-                    .map(superSpec->superSpec.getFacet(facetType));
+        var notANoopFacetFilter = new NotANoopFacetFilter<Q>();
 
-            var facetsCombined = _Streams.concat(facets1, facets2, facets3);
-
-            var notANoopFacetFilter = new NotANoopFacetFilter<Q>();
-
-            return facetsCombined
-                    .filter(notANoopFacetFilter)
-                    .findFirst()
-                    .orElse(notANoopFacetFilter.noopFacet);
-
-        }
+        return facetsCombined
+                .filter(notANoopFacetFilter)
+                .findFirst()
+                .orElse(notANoopFacetFilter.noopFacet);
     }
 
     @Domain.Exclude
@@ -646,51 +522,23 @@ implements ObjectSpecification {
     // -- SUPERCLASS, INTERFACES, SUBCLASSES, IS-ABSTRACT
 
     @Override
-    public ObjectSpecification superclass() {
-        return superclassSpec;
+    public final ObjectSpecification superclass() {
+        return hierarchy.superclass();
     }
 
     @Override
-    public Can<ObjectSpecification> interfaces() {
-        return unmodifiableInterfaces.get();
+    public final Can<ObjectSpecification> interfaces() {
+        return hierarchy.interfaces();
     }
 
     @Override
-    public Can<ObjectSpecification> subclasses(final Depth depth) {
-        if (depth == Depth.DIRECT) {
-            return directSubclasses.snapshot();
-        }
-
-        // depth == Depth.TRANSITIVE)
-        if (transitiveSubclasses == null) {
-            transitiveSubclasses = transitiveSubclasses();
-        }
-
-        return transitiveSubclasses.snapshot();
-    }
-
-    private synchronized Subclasses transitiveSubclasses() {
-        final Subclasses appendTo = new Subclasses();
-        appendSubclasses(this, appendTo);
-        transitiveSubclasses = appendTo;
-        return transitiveSubclasses;
-    }
-
-    private void appendSubclasses(
-            final ObjectSpecification objectSpecification,
-            final Subclasses appendTo) {
-
-        var directSubclasses = objectSpecification.subclasses(Depth.DIRECT);
-        for (ObjectSpecification subclass : directSubclasses) {
-            appendTo.addSubclass(subclass);
-            appendSubclasses(subclass, appendTo);
-        }
-
+    public final Can<ObjectSpecification> subclasses(final Depth depth) {
+        return hierarchy.subclasses(depth);
     }
 
     @Override
-    public boolean hasSubclasses() {
-        return directSubclasses.hasSubclasses();
+    public final boolean hasSubclasses() {
+        return hierarchy.hasSubclasses();
     }
 
     // -- ASSOCIATIONS
@@ -740,22 +588,15 @@ implements ObjectSpecification {
     }
 
     @Override
-    public Stream<ObjectAction> streamRuntimeActions(final MixedIn mixedIn) {
-        var actionScopes = ActionScope.forEnvironment(getMetaModelContext().getSystemEnvironment());
-        return streamActions(actionScopes, mixedIn);
+    public final Stream<ObjectAction> streamRuntimeActions(final MixedIn mixedIn) {
+        return members.actions().streamRuntimeActions(mixedIn);
     }
 
     @Override
-    public Stream<ObjectAction> streamDeclaredActions(
+    public final Stream<ObjectAction> streamDeclaredActions(
             final ImmutableEnumSet<ActionScope> actionScopes,
             final MixedIn mixedIn) {
-        introspectUpTo(IntrospectionState.FULLY_INTROSPECTED);
-
-        mixedInActionAdder.trigger(this::createMixedInActionsAndResort);
-
-        return actionScopes.stream()
-                .flatMap(actionScope->stream(objectActionsByType.get(actionScope)))
-                .filter(mixedIn.toFilter());
+        return members.actions().streamDeclaredActions(actionScopes, mixedIn);
     }
 
     // -- mixin associations (properties and collections)
@@ -798,65 +639,7 @@ implements ObjectSpecification {
         .map(_MixedInMemberFactory.mixedInAssociation(this, mixinSpec, mixinMethodName))
         .peek(facetProcessor::processMemberOrder);
     }
-
-    // -- mixin actions
-    /**
-     * Creates all mixed in actions for this spec.
-     */
-    private Stream<ObjectActionMixedIn> createMixedInActions() {
-        return getCausewayBeanTypeRegistry().streamMixinTypes()
-            .flatMap(this::createMixedInAction);
-    }
-
-    @Deprecated //REFACTOR: remove circular dependency specloader<->objecspec
-    private Stream<ObjectActionMixedIn> createMixedInAction(final Class<?> mixinType) {
-        var mixinSpec = getSpecificationLoader().loadSpecification(mixinType,
-                IntrospectionState.FULLY_INTROSPECTED);
-        return createMixedInAction(mixinSpec);
-    }
-    
-    private Stream<ObjectActionMixedIn> createMixedInAction(final ObjectSpecification mixinSpec) {
-        if (mixinSpec == null
-                || mixinSpec == this) {
-            return Stream.empty();
-        }
-        var mixinFacet = mixinSpec.mixinFacet().orElse(null);
-        if(mixinFacet == null) {
-            // this shouldn't happen; to be covered by meta-model validation later
-            return Stream.empty();
-        }
-        if(!mixinFacet.isMixinFor(getCorrespondingClass())) {
-            return Stream.empty();
-        }
-        // don't mixin Object_ mixins to domain services
-        if(getBeanSort().isManagedBeanContributing()
-                && mixinFacet.isMixinFor(java.lang.Object.class)) {
-            return Stream.empty();
-        }
-
-        var mixinMethodName = mixinFacet.getMainMethodName();
-
-        return mixinSpec.streamActions(ActionScope.ANY, MixedIn.EXCLUDED)
-        // value types only support constructor mixins
-        .filter(this::whenIsValueThenIsAlsoConstructorMixin)
-        .filter(_SpecPredicates::isMixedInAction)
-        .map(ObjectActionDefault.class::cast)
-        .map(_MixedInMemberFactory.mixedInAction(this, mixinSpec, mixinMethodName))
-        .peek(facetProcessor::processMemberOrder);
-    }
-
-    /**
-     * Whether the mixin's main method returns an instance of type equal to the mixee's type.
-     * <p>
-     * Introduced to support constructor mixins for value-types and
-     * also to support associated <i>Actions</i> for <i>Action Parameters</i>.
-     */
-    private boolean whenIsValueThenIsAlsoConstructorMixin(final ObjectAction act) {
-        return getBeanSort().isValue()
-                ? Objects.equals(this, act.getReturnType())
-                : true;
-    }
-
+  
     // -- VALIDITY
 
     @Override
@@ -905,35 +688,7 @@ implements ObjectSpecification {
 
     // -- MIXIN ADDER ONESHOTs
 
-    private final _Oneshot mixedInActionAdder = new _Oneshot();
     private final _Oneshot mixedInAssociationAdder = new _Oneshot();
-
-    /**
-     * one-shot: must be no-op, if already created
-     */
-    private void createMixedInActionsAndResort() {
-        var include = isEntityOrViewModelOrAbstract()
-                || getBeanSort().isManagedBeanContributing()
-                // in support of composite value-type constructor mixins
-                || getBeanSort().isValue();
-        if(!include) {
-            return;
-        }
-        var mixedInActions = createMixedInActions()
-                .collect(Collectors.toList());
-        if(mixedInActions.isEmpty()) {
-           return; // nothing to do (this spec has no mixed-in actions, regular actions have already been added)
-        }
-
-        var regularActions = body.snapshotActions(); // defensive copy
-
-        // note: we are doing this before any member sorting
-        _MemberIdClashReporting.flagAnyMemberIdClashes(this, regularActions, mixedInActions);
-
-        replaceActions(Stream.concat(
-                regularActions.stream(),
-                mixedInActions.stream()));
-    }
 
     /**
      * one-shot: must be no-op, if already created
@@ -948,7 +703,7 @@ implements ObjectSpecification {
            return; // nothing to do (this spec has no mixed-in associations, regular associations have already been added)
         }
 
-        var regularAssociations = body.snapshotAssociations(); // defensive copy
+        var regularAssociations = members.snapshotAssociations(); // defensive copy
 
         // note: we are doing this before any member sorting
         _MemberIdClashReporting.flagAnyMemberIdClashes(this, regularAssociations, mixedInAssociations);

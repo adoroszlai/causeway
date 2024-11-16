@@ -67,13 +67,15 @@ public class FacetedMethodsBuilder
 implements HasMetaModelContext {
 
     /* thread-safety ... make sure every methodsRemaining access is synchronized! */
-    private static final class ConcurrentMethodRemover implements MethodRemover {
+    private record ConcurrentMethodRemover(
+            Set<ResolvedMethod> methodsRemaining) 
+    implements MethodRemover {
 
-        private final Set<ResolvedMethod> methodsRemaining;
-
-        private ConcurrentMethodRemover(final Class<?> introspectedClass, final Stream<ResolvedMethod> methodStream) {
-            this.methodsRemaining = methodStream
-                    .collect(Collectors.toCollection(_Sets::newConcurrentHashSet));
+        ConcurrentMethodRemover(
+                final Class<?> introspectedClass, 
+                final Stream<ResolvedMethod> methodStream) {
+            this(methodStream
+                    .collect(Collectors.toCollection(_Sets::newConcurrentHashSet)));
         }
 
         @Override

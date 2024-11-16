@@ -20,32 +20,30 @@ package org.apache.causeway.core.metamodel.specloader.specimpl;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.apache.causeway.commons.collections.Can;
-import org.apache.causeway.core.metamodel.spec.feature.ObjectAction;
+import org.apache.causeway.core.metamodel.spec.ObjectSpecification;
 import org.apache.causeway.core.metamodel.spec.feature.ObjectAssociation;
+import org.apache.causeway.core.metamodel.specloader.facetprocessor.FacetProcessor;
 
-record ObjectSpecificationBody(
-        List<ObjectAction> objectActions,
+public record ObjectMemberContainerRecord(
+        ObjectSpecification self,
+        ObjectActionContainerRecord actions,
         List<ObjectAssociation> associations
         ) {
     
-    ObjectSpecificationBody() {
-        this(new ArrayList<>(), new ArrayList<>());
-    }
-    
-    Can<ObjectAction> snapshotActions() {
-        return Can.ofCollection(objectActions);
+    ObjectMemberContainerRecord(
+            ObjectSpecification self,
+            Supplier<ObjectSpecification> superclassSupplier,
+            FacetProcessor facetProcessor) {
+        this(self, 
+                new ObjectActionContainerRecord(self, superclassSupplier, facetProcessor), 
+                new ArrayList<>());
     }
 
     Can<ObjectAssociation> snapshotAssociations() {
         return Can.ofCollection(associations);
-    }
-    
-    //synchronized by caller
-    void replaceActions(List<ObjectAction> orderedActions) {
-        objectActions.clear();
-        objectActions.addAll(orderedActions);
     }
     
   //synchronized by caller
@@ -53,4 +51,5 @@ record ObjectSpecificationBody(
         associations.clear();
         associations.addAll(orderedAssociations);
     }
+
 }
