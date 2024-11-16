@@ -22,11 +22,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Stack;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import org.apache.causeway.core.metamodel.spi.EntityTitleSubscriber;
 
 import org.springframework.util.ClassUtils;
 
@@ -91,6 +90,7 @@ import org.apache.causeway.core.metamodel.spec.feature.ObjectAssociation;
 import org.apache.causeway.core.metamodel.spec.feature.ObjectMember;
 import org.apache.causeway.core.metamodel.specloader.facetprocessor.FacetProcessor;
 import org.apache.causeway.core.metamodel.specloader.postprocessor.PostProcessor;
+import org.apache.causeway.core.metamodel.spi.EntityTitleSubscriber;
 import org.apache.causeway.core.metamodel.util.Facets;
 
 import static org.apache.causeway.commons.internal.base._NullSafe.stream;
@@ -138,27 +138,22 @@ implements ObjectSpecification {
 
     private final PostProcessor postProcessor;
     private final FacetProcessor facetProcessor;
+    private final ObjectSpecificationBody body = new ObjectSpecificationBody();
 
     @Getter private final BeanSort beanSort;
 
     // -- ASSOCIATIONS
 
-    private final List<ObjectAssociation> associations = _Lists.newArrayList();
-
     // defensive immutable lazy copy of associations
-    private final _Lazy<Can<ObjectAssociation>> unmodifiableAssociations =
-            _Lazy.threadSafe(()->Can.ofCollection(associations));
+    private final _Lazy<Can<ObjectAssociation>> unmodifiableAssociations = _Lazy.threadSafe(body::snapshotAssociations);
 
     // -- ACTIONS
-
-    private final List<ObjectAction> objectActions = _Lists.newArrayList();
-
+    
     /** not API, used for validation */
     @Getter private final Set<ResolvedMethod> potentialOrphans = _Sets.newHashSet();
 
     // defensive immutable lazy copy of objectActions
-    private final _Lazy<Can<ObjectAction>> unmodifiableActions =
-            _Lazy.threadSafe(()->Can.ofCollection(objectActions));
+    private final _Lazy<Can<ObjectAction>> unmodifiableActions = _Lazy.threadSafe(body::snapshotActions);
 
     // partitions and caches objectActions by type; updated in sortCacheAndUpdateActions()
     private final ListMultimap<ActionScope, ObjectAction> objectActionsByType =
@@ -311,11 +306,23 @@ implements ObjectSpecification {
         this.introspectionState = IntrospectionState.TYPE_INTROSPECTED;
     }
 
+    //TODO[causeway-core-metamodel] remove 
+    final static ThreadLocal<Stack<String>> callStack = ThreadLocal.withInitial(Stack::new);
+    
     private void introspectFully() {
 
         // set to avoid infinite loops
         this.introspectionState = IntrospectionState.MEMBERS_BEING_INTROSPECTED;
+        
+//        callStack.get().push(shortName);
+    //    long start = System.nanoTime();
         introspectMembers();
+  //      long dura = (System.nanoTime() - start)/1000_000;
+      //  callStack.get().pop();
+        
+//        if(dura>5) System.err.printf("%s %s %s->%dms%n", 
+//                Can.ofCollection(callStack.get()).join(", "), beanSort.name(), logicalType.getClassName(), dura);        
+        
         this.introspectionState = IntrospectionState.FULLY_INTROSPECTED;
 
         // make sure we've loaded the facets from layout.xml also.
@@ -373,8 +380,7 @@ implements ObjectSpecification {
     protected final void replaceAssociations(final Stream<ObjectAssociation> associations) {
         var orderedAssociations = _MemberSortingUtils.sortAssociationsIntoList(associations);
         synchronized (unmodifiableAssociations) {
-            this.associations.clear();
-            this.associations.addAll(orderedAssociations);
+            body.replaceAssociations(orderedAssociations);
             unmodifiableAssociations.clear(); // invalidate
         }
     }
@@ -382,8 +388,7 @@ implements ObjectSpecification {
     protected final void replaceActions(final Stream<ObjectAction> objectActions) {
         var orderedActions = _MemberSortingUtils.sortActionsIntoList(objectActions);
         synchronized (unmodifiableActions){
-            this.objectActions.clear();
-            this.objectActions.addAll(orderedActions);
+            body.replaceActions(orderedActions);
             unmodifiableActions.clear(); // invalidate
 
             // rebuild objectActionsByType multi-map
@@ -765,10 +770,14 @@ implements ObjectSpecification {
                 .flatMap(this::createMixedInAssociation);
     }
 
+    @Deprecated //REFACTOR: remove circular dependency specloader<->objecspec
     private Stream<ObjectAssociation> createMixedInAssociation(final Class<?> mixinType) {
-
         var mixinSpec = getSpecificationLoader().loadSpecification(mixinType,
                 IntrospectionState.FULLY_INTROSPECTED);
+        return createMixedInAssociation(mixinSpec);
+    }
+    
+    private Stream<ObjectAssociation> createMixedInAssociation(final ObjectSpecification mixinSpec) {
         if (mixinSpec == null
                 || mixinSpec == this) {
             return Stream.empty();
@@ -786,7 +795,7 @@ implements ObjectSpecification {
         return mixinSpec.streamActions(ActionScope.ANY, MixedIn.EXCLUDED)
         .filter(_SpecPredicates::isMixedInAssociation)
         .map(ObjectActionDefault.class::cast)
-        .map(_MixedInMemberFactory.mixedInAssociation(this, mixinType, mixinMethodName))
+        .map(_MixedInMemberFactory.mixedInAssociation(this, mixinSpec, mixinMethodName))
         .peek(facetProcessor::processMemberOrder);
     }
 
@@ -799,10 +808,14 @@ implements ObjectSpecification {
             .flatMap(this::createMixedInAction);
     }
 
+    @Deprecated //REFACTOR: remove circular dependency specloader<->objecspec
     private Stream<ObjectActionMixedIn> createMixedInAction(final Class<?> mixinType) {
-
         var mixinSpec = getSpecificationLoader().loadSpecification(mixinType,
                 IntrospectionState.FULLY_INTROSPECTED);
+        return createMixedInAction(mixinSpec);
+    }
+    
+    private Stream<ObjectActionMixedIn> createMixedInAction(final ObjectSpecification mixinSpec) {
         if (mixinSpec == null
                 || mixinSpec == this) {
             return Stream.empty();
@@ -828,7 +841,7 @@ implements ObjectSpecification {
         .filter(this::whenIsValueThenIsAlsoConstructorMixin)
         .filter(_SpecPredicates::isMixedInAction)
         .map(ObjectActionDefault.class::cast)
-        .map(_MixedInMemberFactory.mixedInAction(this, mixinType, mixinMethodName))
+        .map(_MixedInMemberFactory.mixedInAction(this, mixinSpec, mixinMethodName))
         .peek(facetProcessor::processMemberOrder);
     }
 
@@ -912,7 +925,7 @@ implements ObjectSpecification {
            return; // nothing to do (this spec has no mixed-in actions, regular actions have already been added)
         }
 
-        var regularActions = _Lists.newArrayList(objectActions); // defensive copy
+        var regularActions = body.snapshotActions(); // defensive copy
 
         // note: we are doing this before any member sorting
         _MemberIdClashReporting.flagAnyMemberIdClashes(this, regularActions, mixedInActions);
@@ -935,7 +948,7 @@ implements ObjectSpecification {
            return; // nothing to do (this spec has no mixed-in associations, regular associations have already been added)
         }
 
-        var regularAssociations = _Lists.newArrayList(associations); // defensive copy
+        var regularAssociations = body.snapshotAssociations(); // defensive copy
 
         // note: we are doing this before any member sorting
         _MemberIdClashReporting.flagAnyMemberIdClashes(this, regularAssociations, mixedInAssociations);

@@ -67,7 +67,7 @@ implements
     // -- ACTIONS
 
     @Override
-    public Optional<ObjectAction> getAction(
+    public final Optional<ObjectAction> getAction(
             final String id, final ImmutableEnumSet<ActionScope> scopes, final MixedIn mixedIn) {
 
         var declaredAction = getDeclaredAction(id, mixedIn); // no inheritance nor type considered
@@ -86,7 +86,7 @@ implements
     }
 
     @Override
-    public Stream<ObjectAction> streamActions(
+    public final Stream<ObjectAction> streamActions(
             final ImmutableEnumSet<ActionScope> actionTypes,
             final MixedIn mixedIn,
             final Consumer<ObjectAction> onActionOverloaded) {
@@ -125,7 +125,7 @@ implements
     // -- ASSOCIATIONS
 
     @Override
-    public Optional<ObjectAssociation> getAssociation(final String id, final MixedIn mixedIn) {
+    public final Optional<ObjectAssociation> getAssociation(final String id, final MixedIn mixedIn) {
 
         var declaredAssociation = getDeclaredAssociation(id, mixedIn); // no inheritance considered
 
@@ -139,7 +139,7 @@ implements
     }
 
     @Override
-    public Stream<ObjectAssociation> streamAssociations(final MixedIn mixedIn) {
+    public final Stream<ObjectAssociation> streamAssociations(final MixedIn mixedIn) {
 
         if(isTypeHierarchyRoot()) {
             return streamDeclaredAssociations(mixedIn); // stop going deeper
